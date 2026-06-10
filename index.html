@@ -626,10 +626,13 @@
                     }
                     if (failed.length > 0) {
                         document.getElementById('portfolioNotice').innerText = `Error descargando: ${failed.join(', ')}. Se eliminarán del cálculo.`;
-                        // remove failed from entries
+                        // Remove failed tickers from the portfolio and renormalize remaining weights.
                         for (const f of failed) { const idx = entries.findIndex(x=>x.ticker===f); if (idx>=0) entries.splice(idx,1); }
+                        const remainingWeight = entries.reduce((s,e)=>s+(e.weight || 0),0);
+                        if (entries.length > 0 && remainingWeight > 0) entries.forEach(e => e.weight = e.weight / remainingWeight);
+                        else if (entries.length > 0) entries.forEach(e => e.weight = 1 / entries.length);
                     }
-                    if (Object.keys(seriesMap).length === 0) { document.getElementById('portfolioNotice').innerText = 'No hay datos válidos.'; return; }
+                    if (Object.keys(seriesMap).length === 0 || entries.length === 0) { document.getElementById('portfolioNotice').innerText = 'No hay datos válidos.'; return; }
 
                     // Find common date window by using max(firstDate) and min(lastDate)
                     const firstDates = Object.values(seriesMap).map(s => s[0].date);
@@ -688,7 +691,8 @@
                             cov[i][j] = covarianceSample(returns[tickers[i]], returns[tickers[j]]);
                         }
                     }
-                    const wVec = entries.map(e=>e.weight);
+                    const weightByTicker = Object.fromEntries(entries.map(e => [e.ticker, e.weight || 0]));
+                    const wVec = tickers.map(t => weightByTicker[t] || 0);
                     const wCol = math.matrix(wVec);
                     const covMat = math.matrix(cov);
                     // math.multiply may return a number, a Matrix-like object or nested arrays depending on mathjs build.
@@ -789,14 +793,15 @@
                 const baseReturns = loadedPortfolio.returns; // object: ticker -> daily returns
                 const tickers = loadedPortfolio.corrTickers;
                 const agg = {};
-                // aggregate returns into non-overlapping windows of size windowDays (simple period returns: sum of daily returns)
+                // Aggregate daily returns into non-overlapping period returns using compounding.
+                // Summing simple returns biases monthly/annual correlations when volatility is material.
                 tickers.forEach(t => {
                     const r = baseReturns[t] || [];
                     const arr = [];
                     for (let i = 0; i < r.length; i += windowDays) {
-                        let sum = 0, count = 0;
-                        for (let j = i; j < Math.min(i + windowDays, r.length); j++) { sum += r[j]; count++; }
-                        if (count > 0) arr.push(sum);
+                        let growth = 1, count = 0;
+                        for (let j = i; j < Math.min(i + windowDays, r.length); j++) { growth *= (1 + r[j]); count++; }
+                        if (count > 0) arr.push(growth - 1);
                     }
                     agg[t] = arr;
                 });
@@ -827,8 +832,8 @@
             }
 
             function renderPortfolioCorrMatrix(labels, z, freqLabel) {
-                // Use the same color scale as the main correlation matrix: blue (-1) to white (+1)
-                const data = [{ z, x: labels, y: labels, type: 'heatmap', colorscale: [[0, '#1e3a8a'], [1, 'white']], zmin: -1, zmax: 1, text: z.map(row => row.map(val => val.toFixed(2))), hoverinfo: 'x+y+z', texttemplate: '%{text}' }];
+                // Diverging scale: negative correlation blue, zero white, positive correlation red.
+                const data = [{ z, x: labels, y: labels, type: 'heatmap', colorscale: [[0, '#1e3a8a'], [0.5, 'white'], [1, '#b91c1c']], zmin: -1, zmax: 1, text: z.map(row => row.map(val => val.toFixed(2))), hoverinfo: 'x+y+z', texttemplate: '%{text}' }];
                 const layout = { title: `Matriz de Correlación (Cartera) - ${document.getElementById('portfolioCorrFreq')?.selectedOptions[0]?.text || ''}`, margin: { t: 40, l: 80, r: 40, b: 80 }, xaxis: { automargin: true }, yaxis: { automargin: true } };
                 Plotly.newPlot('portfolioCorrMatrixChart', data, layout, { responsive: true, displayModeBar: false });
             }
@@ -883,8 +888,11 @@
                         if (eurData && eurData.length) { const eurLast = eurData[eurData.length-1].price; if (eurLast>0) eurFactor = eurLast; }
                     } catch(e){ /* ignore */ }
                 }
-                const currencyLabel = eurFactor ? 'EUR' : 'native';
-                const histBalancesDisplay = eurFactor ? histBalances.map(v=>v / eurFactor) : histBalances.slice();
+                // Keep the historical backtest in native units. Converting all past balances with
+                // today's EURUSD would be economically misleading; only the forward starting balance
+                // uses spot FX as an approximate display conversion.
+                const currencyLabel = eurFactor ? 'EUR (spot aprox.)' : 'native';
+                const histBalancesDisplay = histBalances.slice();
 
                 // Short-term (1y forward) and Long-term (daily) simulations setup
                 const dt = 1 / tradingDays;
@@ -2082,6 +2090,18 @@
                 'EURUSD=X','EURGBP=X','EURJPY=X','EURCHF=X','EURCAD=X','EURSEK=X','EURHUF=X'
             ];
 
+            function currencyDisplayName(ticker) {
+                return ticker.replace('EUR', '').replace('=X', '') + '/EUR';
+            }
+
+            function currencyValueVsEUR(point) {
+                return point && point.price ? 1 / point.price : null;
+            }
+
+            function transformCurrencySeriesVsEUR(series) {
+                return (series || []).map(d => ({ ...d, price: currencyValueVsEUR(d) })).filter(d => Number.isFinite(d.price) && d.price > 0);
+            }
+
             // Load VIX, MOVE and currencies for markets section
             async function loadMarketsExtras() {
                 try {
@@ -2130,10 +2150,10 @@
                 const traces = [];
                 const colors = ['#1e3a8a', '#b91c1c', '#15803d', '#7e22ce', '#c2410c', '#0369a1', '#4d7c0f', '#374151'];
                 tickers.forEach((t, i) => {
-                    const d = globalCurrenciesData[t] || [];
+                    const d = transformCurrencySeriesVsEUR(globalCurrenciesData[t]);
                     if (!d || d.length === 0) return;
                     const first = d[0].price || 1;
-                    traces.push({ x: d.map(p => p.date), y: d.map(p => (p.price / first) * 10), mode: 'lines', name: t.replace('=X',''), line: { color: colors[i % colors.length], width: 2 }, hovertemplate: `${t}: %{y:.2f}<extra></extra>` });
+                    traces.push({ x: d.map(p => p.date), y: d.map(p => (p.price / first) * 10), mode: 'lines', name: currencyDisplayName(t), line: { color: colors[i % colors.length], width: 2 }, hovertemplate: `${currencyDisplayName(t)}: %{y:.2f}<extra></extra>` });
                 });
                 if (traces.length === 0) {
                     document.getElementById('currenciesBase10Chart').innerHTML = '<div class="text-sm text-gray-500 text-center py-12">Datos no disponibles</div>';
@@ -4102,11 +4122,14 @@
                     const maxTot = Math.max(...r);
                     const meanTot = getMean(r);
 
-                    // Calculate Annualized Min/Max
+                    // Calculate annualized values per rolling window. The average annualized return
+                    // must be the average of annualized observations, not the annualization of the
+                    // average total return.
                     const factor = 252 / v;
-                    const minAnn = Math.pow(1 + minTot, factor) - 1;
-                    const maxAnn = Math.pow(1 + maxTot, factor) - 1;
-                    const meanAnn = Math.pow(1 + meanTot, factor) - 1;
+                    const annSeries = r.map(ret => Math.pow(1 + ret, factor) - 1);
+                    const minAnn = Math.min(...annSeries);
+                    const maxAnn = Math.max(...annSeries);
+                    const meanAnn = getMean(annSeries);
 
                     return {
                         horizon: k,
@@ -4149,12 +4172,30 @@
                 }
                 return e.sort((a, b) => a.drawdown - b.drawdown).slice(0, 10);
             }
-            function calculateYearlyStats(d) { const r = []; for (let i = 0; i < d.length; i += 252) { const sub = d.slice(i, i + 252); if (sub.length < 2) continue; const ret = sub[sub.length - 1].price / sub[0].price - 1; const vol = getStdDev(sub.map((v, k) => k ? v.price / sub[k - 1].price - 1 : 0).slice(1)) * Math.sqrt(252); r.push({ range: `${fmtDate(sub[0].date)} - ${fmtDate(sub[sub.length - 1].date)}`, return: ret, volatility: vol }); } return r; }
+            function calculateYearlyStats(d) {
+                const byYear = new Map();
+                d.forEach(point => {
+                    const y = point.date.getFullYear();
+                    if (!byYear.has(y)) byYear.set(y, []);
+                    byYear.get(y).push(point);
+                });
+                const rows = [];
+                Array.from(byYear.keys()).sort((a,b)=>a-b).forEach(y => {
+                    const sub = byYear.get(y).sort((a,b)=>a.date-b.date);
+                    if (sub.length < 2) return;
+                    const ret = sub[sub.length - 1].price / sub[0].price - 1;
+                    const rets = [];
+                    for (let i = 1; i < sub.length; i++) rets.push(sub[i].price / sub[i - 1].price - 1);
+                    const vol = getStdDev(rets) * Math.sqrt(252);
+                    rows.push({ range: `${fmtDate(sub[0].date)} - ${fmtDate(sub[sub.length - 1].date)}`, return: ret, volatility: vol });
+                });
+                return rows;
+            }
 
-            function getMean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
-            function getStdDev(a) { const m = getMean(a); return Math.sqrt(a.reduce((x, y) => x + Math.pow(y - m, 2), 0) / (a.length - 1)); }
-            function getPercentile(a, p) { const s = [...a].sort((x, y) => x - y); const i = (p / 100) * (s.length - 1); return s[Math.floor(i)]; }
-            function fmtPct(n) { return (n * 100).toFixed(2) + '%'; }
+            function getMean(a) { return (!a || a.length === 0) ? 0 : a.reduce((x, y) => x + y, 0) / a.length; }
+            function getStdDev(a) { if (!a || a.length < 2) return 0; const m = getMean(a); return Math.sqrt(a.reduce((x, y) => x + Math.pow(y - m, 2), 0) / (a.length - 1)); }
+            function getPercentile(a, p) { const s = [...(a || [])].sort((x, y) => x - y); if (s.length === 0) return 0; const pos = (p / 100) * (s.length - 1); const base = Math.floor(pos); const rest = pos - base; return s[base + 1] !== undefined ? s[base] + rest * (s[base + 1] - s[base]) : s[base]; }
+            function fmtPct(n) { return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : '-'; }
             function fmtNum(n) { return n.toLocaleString('es-ES', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
             function fmtDate(d) { return d.toISOString().split('T')[0]; }
 
@@ -4337,7 +4378,7 @@
                     let totalAssets = 0;
 
                     currencyTickers.forEach((t, i) => {
-                        const full = globalCurrenciesData[t] || [];
+                        const full = transformCurrencySeriesVsEUR(globalCurrenciesData[t]);
                         const idx = full.findIndex(d => d.date >= targetDate);
                         const sliced = idx !== -1 ? full.slice(idx) : [];
                         if (!sliced || sliced.length === 0) return;
@@ -4346,7 +4387,7 @@
                         const x = sliced.map(d => d.date);
                         const y = sliced.map(d => (d.price / firstPrice) * 10);
                         
-                        traces.push({ x, y, mode: 'lines', name: t.replace('=X',''), line: { color: colors[i % colors.length] }, hovertemplate: `${t.replace('=X','')}: %{y:.2f}<extra></extra>` });
+                        traces.push({ x, y, mode: 'lines', name: currencyDisplayName(t), line: { color: colors[i % colors.length] }, hovertemplate: `${currencyDisplayName(t)}: %{y:.2f}<extra></extra>` });
 
                         const lastY = y[y.length - 1];
                         const lastRet = (sliced[sliced.length - 1].price / firstPrice) - 1;
@@ -4468,12 +4509,15 @@
 
             function updateMarketsTable(sectionType, fullDataDict) {
                 const isIndices = sectionType === 'indices';
-                const currencyObjects = currencyTickers.map(t => ({ s: t, n: t.replace('=X', ''), f: '💱' }));
+                const currencyObjects = currencyTickers.map(t => ({ s: t, n: currencyDisplayName(t), f: '💱' }));
                 
                 let config;
                 if (sectionType === 'indices') config = { list: marketIndices, tableId: 'indicesTableBody', footId: 'indicesTableFoot', skipHeatmap: false };
                 else if (sectionType === 'assets') config = { list: assetClasses, tableId: 'assetsTableBody', footId: 'assetsTableFoot', skipHeatmap: false };
-                else if (sectionType === 'currencies') config = { list: currencyObjects, tableId: 'currenciesTableBody', footId: 'currenciesTableFoot', skipHeatmap: true };
+                else if (sectionType === 'currencies') {
+                    fullDataDict = Object.fromEntries(currencyTickers.map(t => [t, transformCurrencySeriesVsEUR(fullDataDict[t])]));
+                    config = { list: currencyObjects, tableId: 'currenciesTableBody', footId: 'currenciesTableFoot', skipHeatmap: true };
+                }
                 const today = new Date();
                 const milestones = { daily: 1, week: 5, month: 21, threeM: 63, oneY: 252, threeY: 756, fiveY: 1260, tenY: 2520 };
 
