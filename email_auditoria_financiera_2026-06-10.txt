@@ -1,0 +1,35 @@
+Asunto: Auditoría financiera y técnica - EstudioMercados HTML
+
+Hola,
+
+He revisado el proyecto EstudioMercados-HTML y he creado una copia auditada con correcciones sobre cálculos financieros, interpretación económica y algunos glitches relevantes.
+
+Repositorio corregido:
+https://github.com/hali12342026-eng/EstudioMercados-HTML-audit
+
+Informe completo:
+https://github.com/hali12342026-eng/EstudioMercados-HTML-audit/blob/main/informe_auditoria_financiera_2026-06-10.md
+
+Resumen de los principales puntos corregidos:
+
+1. Cartera: si falla la descarga de un ticker, los pesos restantes se renormalizan para evitar una posición de caja implícita no deseada.
+2. Volatilidad/covarianza: el vector de pesos se alinea explícitamente con el orden real de los tickers usados en la matriz.
+3. Correlaciones: las rentabilidades mensuales/semestrales/anuales de cartera se agregan por capitalización compuesta, no sumando retornos simples.
+4. Divisas: los pares EURXXX de Yahoo se invierten para mostrar correctamente XXX/EUR cuando el análisis dice “divisa frente al euro”.
+5. Simulación: se evita convertir todo el histórico a EUR usando el tipo spot actual, porque eso distorsiona el backtest.
+6. Rentabilidades anualizadas móviles: se calcula la media de rentabilidades ya anualizadas por ventana, no la anualización de la media de rentabilidades totales.
+7. Estadísticas anuales: se agrupa por años calendario reales, no por bloques mecánicos de 252 sesiones.
+8. Robustez estadística: se añaden defensas para evitar NaN o percentiles poco rigurosos en muestras vacías o pequeñas.
+
+Validación realizada:
+- Revisión estática del HTML/JavaScript.
+- Extracción de scripts inline y validación con Node.js (`node --check`), correcta.
+- Commit y push en repositorio propio.
+
+Limitaciones pendientes:
+- Validar fuente de datos y total return/dividendos.
+- Revisar el modelo Monte Carlo si se quiere usar con fines profesionales.
+- Añadir advertencias de calidad de datos, fecha de última descarga, divisa, costes e impuestos.
+
+Un saludo,
+Hal
